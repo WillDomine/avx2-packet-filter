@@ -5,100 +5,72 @@
 #include <cstring>
 #include <iostream>
 #include <vector>
+#include <bitset>
+#include "../include/packet.hpp"
+#include "../include/filter.hpp"
 
 #define PORT 9000
 #define QUEUE_DEPTH 256
 #define BUFFER_SIZE 1024
 
-enum EventType {
-    EVENT_ACCEPT,
-    EVENT_READ
-};
-
-struct Request {
-    EventType type;
-    int client_fd;
-    std::vector<char> buffer;
-    struct iovec iov;
-
-    Request(EventType t, int fd) : type(t), client_fd(fd) {
-        buffer.resize(BUFFER_SIZE);
-        iov.iov_base = buffer.data();
-        iov.iov_len = buffer.size();
-    };
-};
-
-void add_read_request(struct io_uring *ring, int client_fd) {
-    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-    Request *req = new Request(EVENT_READ, client_fd);
-    io_uring_prep_readv(sqe, client_fd, &req->iov, 1, 0);
-    io_uring_sqe_set_data(sqe, req);
-}
-
 int main() {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) { perror("Socket failed"); return 1; }
-
-    int opt = 1;
-    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
-
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(PORT);
-    addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("Bind failed"); return 1;
+    size_t batch_count = 8;
+    size_t total_size = sizeof(Packet) * batch_count;
+    
+    // Note: C++17/23 aligned_alloc. 
+    void* mem = std::aligned_alloc(32, total_size);
+    if (!mem) {
+        std::cerr << "Memory allocation failed!" << std::endl;
+        return 1;
     }
-    listen(server_fd, 128);
+    
+    Packet* packet_batch = static_cast<Packet*>(mem);
 
-    struct io_uring ring;
-    if (io_uring_queue_init(QUEUE_DEPTH, &ring, 0) < 0) {
-        perror("io_uring init failed"); return 1;
-    }
-
-    struct sockaddr_in client_addr{};
-    socklen_t client_len = sizeof(client_addr);
-
-    add_accept_request(&ring, server_fd, &client_addr, &client_len);
-    io_uring_submit(&ring);
-
-    std::cout << "Running on Port: " << PORT << std::endl;
-
-    while (true) {
-        struct io_uring_cqe *cqe;
+    // 2. Generate Data (Simulate Network Traffic)
+    std::cout << "--- Generating 8 Packets ---" << std::endl;
+    for(int i=0; i < 8; i++) {
+        // Clear header
+        packet_batch[i].header = 0; 
         
-        int ret = io_uring_wait_cqe(&ring, &cqe);
-        if (ret < 0) { perror("Wait error"); continue; }
+        // Mark Packets 2 and 5 as "Malicious" (Admin Bit Set)
+        if (i == 2 || i == 5) {
+            packet_batch[i].header |= MASK_ADMIN;
+            std::cout << "Packet " << i << ": [BAD]  Admin Bit Set" << std::endl;
+        } else {
+            // Set some random sequence number (lower bits)
+            packet_batch[i].header |= (i + 100); 
+            std::cout << "Packet " << i << ": [GOOD] Normal Player" << std::endl;
+        }
+    }
 
-        Request *req = (Request *)io_uring_cqe_get_data(cqe);
+    // 3. The "Hot Path" - Run the SIMD Filter
+    std::cout << "\n--- Executing AVX2 Filter (Single Cycle) ---" << std::endl;
+    
+    // This function call replaces a loop of 8 'if' statements
+    uint8_t drop_mask = filter_batch_8_avx2(packet_batch);
 
-        if (req->type == EVENT_ACCEPT) {
-            int client_sock = cqe->res;
-            if (client_sock >= 0) {
-                std::cout << "New Connection: " << client_sock << std::endl;
-                add_read_request(&ring, client_sock);
-                
-                add_accept_request(&ring, server_fd, &client_addr, &client_len);
-            }
-        } 
-        else if (req->type == EVENT_READ) {
-            int bytes_read = cqe->res;
-            if (bytes_read > 0) {
-                add_read_request(&ring, req->client_fd);
+    // 4. Process Results
+    std::cout << "Result Bitmask: " << std::bitset<8>(drop_mask) << " (Binary)" << std::endl;
+    std::cout << "--------------------------------------------" << std::endl;
+
+    if (drop_mask == 0) {
+        std::cout << "Fast Path: All packets valid. No further checks needed." << std::endl;
+    } else {
+        // We found bad packets. Now we iterate the mask (cheap bitwise logic)
+        // to find *which* ones to drop.
+        for(int i=0; i<8; i++) {
+            // Check bit 'i'
+            bool drop = (drop_mask >> i) & 1;
+            
+            if (drop) {
+                std::cout << "Action: DROP Packet " << i << " (Caught by SIMD)" << std::endl;
             } else {
-                std::cout << "Disconnect: " << req->client_fd << std::endl;
-                close(req->client_fd);
+                std::cout << "Action: KEEP Packet " << i << std::endl;
             }
         }
-
-        delete req;
-        io_uring_cqe_seen(&ring, cqe);
-        
-        io_uring_submit(&ring);
     }
 
-    close(server_fd);
-    io_uring_queue_exit(&ring);
+    // Cleanup
+    std::free(mem);
     return 0;
 }

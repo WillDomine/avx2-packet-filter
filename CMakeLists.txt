@@ -17,3 +17,11 @@ add_executable(packet_engine src/main.cpp)
 
 target_link_libraries(packet_engine PRIVATE ${URING_LIBRARIES})
 target_include_directories(packet_engine PRIVATE ${URING_INCLUDE_DIRS} include)
+
+find_package(benchmark REQUIRED)
+
+add_executable(run_benchmarks benchmarks/filter_bench.cpp)
+
+target_link_libraries(run_benchmarks PRIVATE benchmark::benchmark pthread)
+
+target_compile_options(run_benchmarks PRIVATE -O3 -march=native)
