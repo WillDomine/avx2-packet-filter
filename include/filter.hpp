@@ -5,7 +5,7 @@
 #include <iostream>
 
 //Filters the packets in batches of 8 using AVX2
-uint8_t filter_batch_8_avx2(Packet* packets) {
+inline uint8_t filter_batch_8_avx2(Packet* packets) {
 
     //Precalc the index for 32-byte packets we are looking for header for the flags
     const __m256i INDICIES = _mm256_setr_epi32(0,8,16,24,32,40,48,56);
